@@ -1,15 +1,16 @@
 # Plausible Proxy Worker
 
-A Cloudflare Workers-based proxy for Plausible Analytics that allows you to serve analytics from your own domain, improving data collection reliability by avoiding ad-blockers and privacy extensions.
+A scalable Cloudflare Workers-based proxy for Plausible Analytics that serves multiple client websites from a single deployment using the `analytics.<client>.com` pattern.
 
 ## Overview
 
-This worker acts as a first-party proxy between your website and Plausible Analytics, routing requests through your own domain (e.g., `analytics.yourdomain.com`) instead of directly to `plausible.io`. This approach:
+This worker acts as a first-party proxy between your websites and Plausible Analytics, routing requests through client-specific subdomains (e.g., `analytics.bullingtonconsulting.com`) instead of directly to `plausible.io`. This approach:
 
 - **Bypasses ad-blockers** that commonly block third-party analytics scripts
 - **Improves data accuracy** by avoiding browser privacy features that block cross-origin requests
+- **Scales to multiple clients** with a single worker deployment
 - **Maintains privacy** while ensuring complete analytics coverage
-- **Reduces script loading failures** caused by network-level blocking
+- **Automatically handles CORS** for both apex and www domains
 
 ## How It Works
 
@@ -17,6 +18,14 @@ The worker provides two main endpoints:
 
 1. **`/p.js`** - Serves the Plausible analytics script from your domain
 2. **`/api/event`** - Proxies analytics events to Plausible's servers
+
+### Multi-Client Architecture
+
+- Deploy once, serve unlimited client domains
+- Pattern: `analytics.<client>.com` automatically allows:
+  - `https://<client>.com` (apex domain)
+  - `https://www.<client>.com` (www subdomain)
+- Smart CORS handling based on the analytics hostname
 
 ## Setup
 
@@ -34,34 +43,38 @@ cd plausible-worker
 npm install
 ```
 
-### 2. Configure Your Domain
+### 2. Configure Your Domains
 
-Edit `wrangler.jsonc` to configure your analytics subdomain:
+Edit `wrangler.jsonc` to configure your analytics subdomains for multiple clients:
 
 ```jsonc
 {
   "routes": [
     {
-      "pattern": "analytics.yourdomain.com/*",
-      "zone_name": "yourdomain.com"
+      "pattern": "analytics.client1.com/*",
+      "zone_name": "client1.com"
+    },
+    {
+      "pattern": "analytics.client2.com/*",
+      "zone_name": "client2.com"
     }
+    // Add more client domains as needed
   ]
 }
 ```
 
-Replace `yourdomain.com` with your actual domain.
+### 3. Optional: Restrict Access with Host Allowlist
 
-### 3. Optional: Set Host Allowlist
+For additional security, you can restrict which analytics domains can use your proxy by setting the `ALLOW_HOSTS` environment variable in `wrangler.toml`:
 
-For additional security, you can restrict which domains can use your proxy by setting the `ALLOW_HOSTS` environment variable:
-
-```jsonc
-{
-  "vars": {
-    "ALLOW_HOSTS": "analytics.yourdomain.com,analytics.anotherdomain.com"
-  }
-}
+```toml
+[vars]
+ALLOW_HOSTS = "analytics.client1.com,analytics.client2.com"
 ```
+
+Or via Cloudflare dashboard: Workers & Pages → Your Worker → Settings → Variables
+
+**Note:** Without `ALLOW_HOSTS`, any domain with the `analytics.<domain>` pattern can use your worker.
 
 ### 4. Deploy
 
@@ -71,26 +84,29 @@ npm run deploy
 
 ## Usage
 
-### Update Your Website
+### Update Your Client Websites
 
-Replace your existing Plausible script tag:
+For each client website, replace the Plausible script tag:
 
 **Before:**
 ```html
-<script defer data-domain="yourdomain.com" src="https://plausible.io/js/script.js"></script>
+<script defer data-domain="clientdomain.com" src="https://plausible.io/js/script.js"></script>
 ```
 
 **After:**
 ```html
-<script defer data-domain="yourdomain.com" src="https://analytics.yourdomain.com/p.js"></script>
+<script defer data-domain="clientdomain.com" src="https://analytics.clientdomain.com/p.js"></script>
 ```
+
+The worker automatically handles CORS to allow requests from both `clientdomain.com` and `www.clientdomain.com`.
 
 ### DNS Configuration
 
-Ensure your analytics subdomain points to your Cloudflare Workers:
+For each client domain:
 
-1. In your Cloudflare dashboard, go to your domain's DNS settings
-2. Add a CNAME record: `analytics` pointing to your worker (this is usually handled automatically by the route configuration)
+1. In Cloudflare dashboard, go to the client domain's DNS settings
+2. Add a CNAME record: `analytics` pointing to your worker route
+3. Or use a wildcard route in your worker configuration to handle all `analytics.*` subdomains automatically
 
 ## Development
 
@@ -124,7 +140,10 @@ npm run cf-typegen
 
 ### Environment Variables
 
-- **`ALLOW_HOSTS`** (optional): Comma-separated list of allowed hostnames for additional security
+- **`ALLOW_HOSTS`** (optional): Comma-separated list of allowed analytics hostnames
+  - Example: `"analytics.client1.com,analytics.client2.com"`
+  - If not set: Any `analytics.<domain>` can use the worker
+  - If set: Only listed domains can use the worker (403 for others)
 
 ### Routes
 
@@ -145,10 +164,13 @@ Configure which domains should route to your worker in `wrangler.jsonc`:
 
 ## Security Features
 
-- **Host allowlist**: Optional restriction of which domains can use the proxy
-- **CORS headers**: Proper cross-origin resource sharing configuration
+- **Smart CORS Policy**: Automatically allows only the correct origin based on analytics hostname
+  - `analytics.example.com` → allows `https://example.com` and `https://www.example.com`
+  - Denies all other origins (returns minimal headers to trigger browser blocking)
+- **Host allowlist**: Optional restriction via `ALLOW_HOSTS` environment variable
+- **Defense in depth**: Multiple security layers (host validation + CORS)
 - **Security headers**: Includes `x-content-type-options` and `referrer-policy`
-- **Request forwarding**: Preserves necessary headers (User-Agent, Referer) for accurate analytics
+- **Minimal data forwarding**: Only forwards necessary headers (User-Agent, Referer) to Plausible
 
 ## Troubleshooting
 
@@ -163,9 +185,12 @@ Configure which domains should route to your worker in `wrangler.jsonc`:
 
 If you encounter CORS errors:
 
-1. Verify the script is loaded from the same domain as configured
-2. Check that the `data-domain` attribute matches your actual domain
-3. Ensure the worker is properly handling OPTIONS preflight requests
+1. **Check the origin**: The worker automatically allows requests from:
+   - `https://<client>.com` (if analytics is at `analytics.<client>.com`)
+   - `https://www.<client>.com` (www variant)
+2. **Verify script source**: Ensure your script tag uses `https://analytics.<client>.com/p.js`
+3. **Check `data-domain`**: Should match your actual domain in Plausible
+4. **Subdomain sites**: If your site is at `app.example.com`, you need `analytics.app.example.com`
 
 ### 403 Forbidden Errors
 
