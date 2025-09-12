@@ -15,6 +15,10 @@
 			"pattern": "analytics.bullingtonconsulting.com/*",
 			"zone_name": "bullingtonconsulting.com",
 		},
+		{
+			"pattern": "analytics.arroweffect.com/*",
+			"zone_name": "arroweffect.com",
+		},
 	],
 	/**
 	 * Smart Placement
